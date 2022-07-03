@@ -26,6 +26,10 @@ class FROST:
         def G(cls):
             return FROST.Point(cls.G_x, cls.G_y)
 
+        @classmethod
+        def scalar_negate(cls, val):
+            return (cls.P - val) % cls.P
+
     class Participant:
         """Class representing a FROST participant."""
 
@@ -45,6 +49,7 @@ class FROST:
             self.nonce_commitment_pairs = []
             # Y
             self.public_key = None
+            self.negated = None
 
         def init_keygen(self):
             Q = FROST.secp256k1.Q
@@ -159,8 +164,13 @@ class FROST:
             public_key = self.coefficient_commitments[0]
             for secret_commitment in secret_commitments:
                 public_key = public_key + secret_commitment
-            self.public_key = public_key
-            return public_key
+
+            self.negated = not public_key.is_even()
+            if self.negated:
+                self.public_key = -public_key
+            else:
+                self.public_key = public_key
+            return self.public_key
 
         def generate_nonces(self, amount):
             Q = FROST.secp256k1.Q
@@ -178,7 +188,7 @@ class FROST:
 
         def sign(self, message, nonce_commitment_pairs, participant_indexes):
             # R
-            group_commitment = FROST.Aggregator.group_commitment(message, nonce_commitment_pairs, participant_indexes)
+            group_commitment, negate_nonce = FROST.Aggregator.group_commitment(message, nonce_commitment_pairs, participant_indexes)
 
             # c = H_2(R, Y, m)
             challenge_hash = FROST.Aggregator.challenge_hash(group_commitment, self.public_key, message)
@@ -186,13 +196,16 @@ class FROST:
             # Fetch next available nonce pair
             nonce_pair = self.nonce_pairs.pop()
             # d_i
-            first_nonce = nonce_pair[0]
+            first_nonce = nonce_pair[0] if not negate_nonce else -nonce_pair[0]
             # e_i
-            second_nonce = nonce_pair[1]
+            second_nonce = nonce_pair[1] if not negate_nonce else -nonce_pair[1]
             # p_i = H_1(i, m, B), i ∈ S
             binding_value = FROST.Aggregator.binding_value(self.index, message, nonce_commitment_pairs, participant_indexes)
             # λ_i
             lagrange_coefficient = self.lagrange_coefficient(participant_indexes)
+            if self.negated:
+                lagrange_coefficient = FROST.secp256k1.scalar_negate(lagrange_coefficient)
+
             # s_i
             aggregate_share = self.aggregate_share
 
@@ -227,7 +240,11 @@ class FROST:
                 second_commitment = nonce_commitment_pairs[index-1][1]
                 # R = ∏ D_l * (E_l)^p_l, l ∈ S
                 group_commitment = group_commitment + (first_commitment + (binding_value * second_commitment))
-            return group_commitment
+
+            negate = not group_commitment.is_even()
+            if negate:
+                group_commitment = -group_commitment
+            return group_commitment, negate
 
         @classmethod
         def binding_value(self, index, message, nonce_commitment_pairs, participant_indexes):
@@ -276,7 +293,7 @@ class FROST:
 
         def signature(self, signature_shares):
             # R
-            group_commitment = self.group_commitment(self.message, self.nonce_commitment_pairs, self.participant_indexes)
+            group_commitment, _ = self.group_commitment(self.message, self.nonce_commitment_pairs, self.participant_indexes)
             # c = H_2(R, Y, m)
             challenge_hash = self.challenge_hash(group_commitment, self.public_key, self.message)
             # TODO: verify each signature share
@@ -317,6 +334,9 @@ class FROST:
         # point at infinity
         def is_zero(self):
             return self.x == float('inf') or self.y == float('inf')
+
+        def is_even(self):
+            return self.y % 2 == 0
 
         def __eq__(self, other):
             return self.x == other.x and self.y == other.y
@@ -455,6 +475,7 @@ class Tests(unittest.TestCase):
 
         self.assertEqual(pk1, pk2)
         self.assertEqual(pk2, pk3)
+        assert pk1.is_even()
 
         # Reconstruct secret
         l1 = p1.lagrange_coefficient([2])
